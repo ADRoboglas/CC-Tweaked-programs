@@ -25,51 +25,50 @@ local scanBlocks = geoScanner.scan or geoScanner.scanBlocks
 if not scanBlocks then
     error("Error: Scan method not found on Geo Scanner.", 0)
 end
-
-term.clear()
-term.setCursorPos(1, 1)
-print("=== Amethyst Cluster Scanner ===")
-print(string.format("PC Coords: X:%d | Y:%d | Z:%d", PC_X, PC_Y, PC_Z))
-print("Scanning in radius " .. RADIUS .. "...")
-
--- Perform scan
-local success, result = pcall(scanBlocks, RADIUS)
-if not success or not result then
-    error("Scan failed! (Cooldown active or no energy)", 0)
-end
-
--- Process results
-local iotaList = {}
-
-for _, block in ipairs(result) do
-    if block.name == TARGET_BLOCK then
-        -- Calculate absolute coordinates
-        local absX = PC_X + block.x
-        local absY = PC_Y + block.y
-        local absZ = PC_Z + block.z
+while true do
+    term.clear()
+    term.setCursorPos(1, 1)
+    print("=== Amethyst Cluster Scanner ===")
+    print(string.format("PC Coords: X:%d | Y:%d | Z:%d", PC_X, PC_Y, PC_Z))
+    print("Scanning in radius " .. RADIUS .. "...")
+    
+    -- Perform scan
+    local success, result = pcall(scanBlocks, RADIUS)
+    if not success or not result then
+        error("Scan failed! (Cooldown active or no energy)", 0)
+    end
+    
+    -- Process results
+    local iotaList = {}
+    
+    for _, block in ipairs(result) do
+        if block.name == TARGET_BLOCK then
+            -- Calculate absolute coordinates
+            local absX = PC_X + block.x+0.5
+            local absY = PC_Y + block.y
+            local absZ = PC_Z + block.z+0.5
+            
+            -- Add to list in {{x=0,y=0,z=0}} format
+            table.insert(iotaList, {x = absX, y = absY, z = absZ})
+        end
+    end
         
-        -- Add to list in {{x=0,y=0,z=0}} format
-        table.insert(iotaList, {x = absX, y = absY, z = absZ})
+    if #iotaList == 0 then
+        print("No clusters found. Focus was not updated.")
+        return
     end
-end
-
-print("Clusters found: " .. #iotaList)
-
-if #iotaList == 0 then
-    print("No clusters found. Focus was not updated.")
-    return
-end
-
--- Write to Focal Port
-print("Writing to Focal Port...")
-local writeSuccess, writeError = pcall(focalPort.writeIota, iotaList)
-
-if writeSuccess then
-    print("SUCCESS! Data written to focus.")
-    for i, vec in ipairs(iotaList) do
-        print(string.format("  [%d] X:%d Y:%d Z:%d", i, vec.x, vec.y, vec.z))
+    
+    -- Write to Focal Port
+    print("Writing to Focal Port...")
+    local writeSuccess, writeError = pcall(focalPort.writeIota, iotaList)
+    
+    if writeSuccess then
+        print("SUCCESS! Data written to focus.")
+        for i, vec in ipairs(iotaList) do
+            print(string.format("  [%d] X:%d Y:%d Z:%d", i, vec.x, vec.y, vec.z))
+        end
+    else
+        print("WRITE ERROR: " .. tostring(writeError))
+        print("Make sure a writable focus is in the Focal Port.")
     end
-else
-    print("WRITE ERROR: " .. tostring(writeError))
-    print("Make sure a writable focus is in the Focal Port.")
 end
