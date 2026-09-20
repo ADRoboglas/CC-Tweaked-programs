@@ -1,58 +1,75 @@
--- Поиск аметистов через Geo Scanner (Advanced Peripherals)
+-- Configuration
+-- REPLACE THESE WITH YOUR ACTUAL PC COORDINATES
+local PC_X = 3546
+local PC_Y = 85
+local PC_Z = -4217
 
-local RADIUS = 8 -- Радиус сканирования (обычно от 1 до 8 или до 16 в зависимости от конфига)
-local SEARCH_PATTERN = "amethyst" -- Поисковый запрос (ищет все блоки, содержащие "amethyst")
+local RADIUS = 8
+local TARGET_BLOCK = "minecraft:amethyst_cluster"
 
--- Подключение периферийного устройства
+-- Find peripherals
 local geoScanner = peripheral.find("geoScanner")
+local focalPort = peripheral.find("focal_port")
+
 if not geoScanner then
-    error("Ошибка: Geo Scanner не обнаружен! Проверьте подключение.", 0)
+    error("Error: Geo Scanner not found!", 0)
+end
+if not focalPort then
+    error("Error: Focal Port not found!", 0)
+end
+if not focalPort.writeIota then
+    error("Error: writeIota method not found. Check if focus is inserted.", 0)
 end
 
--- Совместимость с разными версиями Advanced Peripherals
 local scanBlocks = geoScanner.scan or geoScanner.scanBlocks
 if not scanBlocks then
-    error("Ошибка: Не найден метод сканирования у Geo Scanner.", 0)
+    error("Error: Scan method not found on Geo Scanner.", 0)
 end
 
 term.clear()
 term.setCursorPos(1, 1)
-print("=== Сканер Аметиста ===")
-print("Сканирование в радиусе " .. RADIUS .. " блоков...")
+print("=== Amethyst Cluster Scanner ===")
+print(string.format("PC Coords: X:%d | Y:%d | Z:%d", PC_X, PC_Y, PC_Z))
+print("Scanning in radius " .. RADIUS .. "...")
 
--- Выполнение сканирования
+-- Perform scan
 local success, result = pcall(scanBlocks, RADIUS)
 if not success or not result then
-    print("\nОшибка сканирования!")
-    print("Возможные причины: сканер на перезарядке или недостаточно энергии/топлива.")
+    error("Scan failed! (Cooldown active or no energy)", 0)
+end
+
+-- Process results
+local iotaList = {}
+
+for _, block in ipairs(result) do
+    if block.name == TARGET_BLOCK then
+        -- Calculate absolute coordinates
+        local absX = PC_X + block.x
+        local absY = PC_Y + block.y
+        local absZ = PC_Z + block.z
+        
+        -- Add to list in {{x=0,y=0,z=0}} format
+        table.insert(iotaList, {x = absX, y = absY, z = absZ})
+    end
+end
+
+print("Clusters found: " .. #iotaList)
+
+if #iotaList == 0 then
+    print("No clusters found. Focus was not updated.")
     return
 end
 
--- Фильтрация найденных блоков
-local found = {}
-for _, block in ipairs(result) do
-    if block.name and string.find(block.name:lower(), SEARCH_PATTERN) then
-        table.insert(found, block)
+-- Write to Focal Port
+print("Writing to Focal Port...")
+local writeSuccess, writeError = pcall(focalPort.writeIota, iotaList)
+
+if writeSuccess then
+    print("SUCCESS! Data written to focus.")
+    for i, vec in ipairs(iotaList) do
+        print(string.format("  [%d] X:%d Y:%d Z:%d", i, vec.x, vec.y, vec.z))
     end
-end
-
--- Сортировка по расстоянию до центра (от ближайшего к дальнему)
-table.sort(found, function(a, b)
-    local distA = a.x*a.x + a.y*a.y + a.z*a.z
-    local distB = b.x*b.x + b.y*b.y + b.z*b.z
-    return distA < distB
-end)
-
--- Вывод результатов
-print("\nНайдено аметистовых блоков: " .. #found)
-print("-----------------------------------")
-
-if #found == 0 then
-    print("В указанном радиусе аметистов не найдено.")
 else
-    for i, b in ipairs(found) do
-        -- Координаты относительно компьютера (X: право/лево, Y: верх/низ, Z: вперед/назад)
-        print(string.format("[%d] %s", i, b.name))
-        print(string.format("    Относительные координаты: X:%+d | Y:%+d | Z:%+d", b.x, b.y, b.z))
-    end
+    print("WRITE ERROR: " .. tostring(writeError))
+    print("Make sure a writable focus is in the Focal Port.")
 end
