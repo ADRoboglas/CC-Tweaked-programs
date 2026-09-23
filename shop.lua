@@ -1,5 +1,5 @@
 --[[===========================================================================
-  SHOP  v1.0.2  --  CC:Tweaked storefront
+  SHOP  v1.0.3  --  CC:Tweaked storefront
   Refined Storage (or AE2) through an Advanced Peripherals bridge + one barrel.
 
   Wiring:
@@ -13,7 +13,7 @@
   Data lives in  shopdata/  next to this program.
 ===========================================================================]]--
 
-local VERSION = "1.0.2"
+local VERSION = "1.0.3"
 
 local DIR    = "shopdata"
 local F_CFG  = DIR .. "/config.tbl"
@@ -1656,62 +1656,104 @@ local function showRet(label, r, e)
   elseif type(r) == "table" then txt = "table"
   else txt = tostring(r) end
   local good = (tonumber(r) or 0) > 0
-  pr("  " .. pad(label, 22) .. trunc(txt, 24), good and colors.lime or colors.orange)
+  pr("  " .. pad(label, 20) .. trunc(txt, 26), good and colors.lime or colors.orange)
   return (tonumber(r) or 0)
 end
 
+local function num(m)
+  if not bridge[m] then return nil end
+  return tonumber((bx(bridge[m])))
+end
+
 local function probe()
-  aclear("SELF TEST 4/4  bridge probe")
   if not (bridge and barrel and barrelName) then
+    aclear("PROBE")
     pr("bridge or teller missing", colors.red)
     return pause()
   end
+  scanTeller()
+  local pick, have
+  for id, n in pairs(tellerCount) do if n > 0 then pick, have = id, n break end end
 
-  -- what does this build of the bridge actually offer?
+  ------------------------------------------------------------------ 1/3
+  aclear("PROBE 1/3  what this bridge offers")
   local ok, ms = pcall(peripheral.getMethods, peripheral.getName(bridge))
+  local has = {}
   if ok and type(ms) == "table" then
+    for _, m in ipairs(ms) do has[m] = true end
     local want = { "listItems", "getItem", "isConnected", "exportItemToPeripheral",
                    "importItemFromPeripheral", "exportItem", "importItem",
                    "getMaxItemDiskStorage", "getItemStorage", "getTotalItemStorage",
-                   "getUsedItemStorage" }
-    local have = {}
-    for _, m in ipairs(ms) do have[m] = true end
+                   "getUsedItemStorage", "getEnergyStorage", "getEnergyUsage" }
     for _, m in ipairs(want) do
-      if have[m] then pr("  " .. pad(m, 26) .. "yes", colors.lime)
-      else pr("  " .. pad(m, 26) .. "MISSING", colors.orange) end
+      pr("  " .. pad(m, 26) .. (has[m] and "yes" or "MISSING"),
+         has[m] and colors.lime or colors.gray)
     end
   else
     pr("  cannot list the bridge methods", colors.orange)
   end
   pause()
 
-  aclear("PROBE  network")
-  if bridge.isConnected then
-    local c, e = bx(bridge.isConnected)
-    pr("isConnected     : " .. tostring(c) .. (e and (" " .. tostring(e)) or ""),
-       c and colors.lime or colors.red)
-  end
-  for _, m in ipairs({ "getUsedItemStorage", "getTotalItemStorage", "getMaxItemDiskStorage" }) do
-    if bridge[m] then
-      local v = tonumber((bx(bridge[m]))) or -1
-      pr(pad(m, 22) .. ": " .. commify(v), colors.lightGray)
+  ------------------------------------------------------------------ 2/3
+  aclear("PROBE 2/3  is the network really there")
+  local conn = nil
+  if bridge.isConnected then conn = (bx(bridge.isConnected)) end
+  if conn ~= nil then
+    pr("isConnected        : " .. tostring(conn), conn and colors.lime or colors.red)
+    if conn == false then
+      pr("  THE BRIDGE SEES NO NETWORK. put it directly", colors.red)
+      pr("  against a cable/controller and power it.", colors.red)
     end
   end
-  pr("if used storage equals the total, the network is", colors.lightGray)
-  pr("full and every import answers 0 without an error.", colors.lightGray)
+
+  local l = bx(bridge.listItems)
+  local stacks = (type(l) == "table") and #l or -1
+  pr("listItems          : " .. (stacks >= 0 and (stacks .. " stacks") or "FAILED"),
+     stacks > 0 and colors.lime or colors.red)
+  if stacks == 0 then
+    pr("  the network answers but holds nothing - it has", colors.orange)
+    pr("  no disks, or this is not the right network.", colors.orange)
+  end
+
+  local disk = num("getMaxItemDiskStorage")
+  if disk then
+    pr("max disk storage   : " .. commify(disk), disk > 0 and colors.white or colors.red)
+    if disk <= 0 then
+      pr("  NO ITEM STORAGE IN THE NETWORK. with zero disk", colors.red)
+      pr("  space every import answers 0 and moves nothing.", colors.red)
+      pr("  put a disk drive with a disk, or a storage block.", colors.red)
+    end
+  end
+  local used, total = num("getUsedItemStorage"), num("getTotalItemStorage")
+  if used and total then
+    pr("used / total       : " .. commify(used) .. " / " .. commify(total),
+       (total > 0 and used < total) and colors.white or colors.red)
+    if total > 0 and used >= total then
+      pr("  STORAGE IS FULL - imports will answer 0.", colors.red)
+    end
+  end
+  local en, eu = num("getEnergyStorage"), num("getEnergyUsage")
+  if en or eu then
+    pr("energy             : " .. tostring(en) .. " stored, " .. tostring(eu) .. " use",
+       ((eu or 0) > 0 and (en or 0) <= 0) and colors.red or colors.white)
+    if (eu or 0) > 0 and (en or 0) <= 0 then
+      pr("  THE BRIDGE NEEDS POWER AND HAS NONE.", colors.red)
+    end
+  end
+  if pick and bridge.getItem then
+    local g = bx(bridge.getItem, { name = pick })
+    local amt = (type(g) == "table") and (tonumber(g.amount) or tonumber(g.count) or 0) or -1
+    pr("getItem " .. pad(shortId(pick), 11) .. ": " .. (amt >= 0 and commify(amt) or "nil"))
+  end
   pause()
 
-  -- a real move, tried in every shape this api might want
-  scanTeller()
-  local pick, have
-  for id, n in pairs(tellerCount) do if n > 0 then pick, have = id, n break end end
-  aclear("PROBE  moving " .. (pick and shortId(pick) or "?"))
+  ------------------------------------------------------------------ 3/3
+  aclear("PROBE 3/3  a real move")
   if not pick then
-    pr("put one item in the teller and run the probe again.", colors.orange)
+    pr("put one item in the teller and run this again.", colors.orange)
     return pause()
   end
-  pr(pick .. "  x" .. have .. "  in the teller", colors.yellow)
-  pr("network holds " .. commify(stockOf(pick)), colors.lightGray)
+  pr(pick .. " x" .. have, colors.yellow)
   pr("teller peripheral: " .. barrelName, colors.lightGray)
   print("")
 
@@ -1723,9 +1765,24 @@ local function probe()
     r, e = bx(bridge.importItemFromPeripheral, { name = pick }, barrelName)
     moved = moved + showRet("name only", r, e)
   end
+  if moved == 0 and type(l) == "table" and bridge.importItemFromPeripheral then
+    -- fingerprint matching, when this build supports it
+    local fp
+    for _, it in ipairs(l) do
+      if it.name == pick and it.fingerprint then fp = it.fingerprint break end
+    end
+    if fp then
+      r, e = bx(bridge.importItemFromPeripheral, { fingerprint = fp, count = 1 }, barrelName)
+      moved = moved + showRet("fingerprint", r, e)
+    end
+  end
   if moved == 0 and bridge.importItem then
-    r, e = bx(bridge.importItem, { name = pick, count = 1 }, "up")
-    moved = moved + showRet("importItem up", r, e)
+    for _, side in ipairs({ "up", "down", "north", "south", "east", "west" }) do
+      if moved == 0 then
+        r, e = bx(bridge.importItem, { name = pick, count = 1 }, side)
+        moved = moved + showRet("importItem " .. side, r, e)
+      end
+    end
   end
 
   if moved > 0 then
@@ -1734,24 +1791,28 @@ local function probe()
     r, e = bx(bridge.exportItemToPeripheral, { name = pick, count = moved }, barrelName)
     back = back + showRet("name+count", r, e)
     if back < moved and bridge.exportItem then
-      r, e = bx(bridge.exportItem, { name = pick, count = moved - back }, "up")
-      back = back + showRet("exportItem up", r, e)
+      for _, side in ipairs({ "up", "down", "north", "south", "east", "west" }) do
+        if back < moved then
+          r, e = bx(bridge.exportItem, { name = pick, count = moved - back }, side)
+          back = back + showRet("exportItem " .. side, r, e)
+        end
+      end
     end
     if back < moved then
-      pr("  " .. (moved - back) .. " left in the network - take it out", colors.orange)
+      pr("  " .. (moved - back) .. " stayed in the network - take it out", colors.orange)
     end
-  end
-  print("")
-  if moved > 0 then
-    pr("the bridge CAN move this item.", colors.lime)
-    pr("if deposits still fail, the currency id in", colors.lime)
-    pr("4 CURRENCY does not match the id above.", colors.lime)
+    print("")
+    pr("the bridge CAN move this item. if deposits still", colors.lime)
+    pr("fail, the currency id in 4 CURRENCY does not match", colors.lime)
+    pr("the id printed above.", colors.lime)
   else
-    pr("the bridge moved nothing. usual reasons:", colors.red)
-    pr("1 the teller is not on a wired modem network", colors.orange)
-    pr("2 the bridge is not touching the RS/ME network", colors.orange)
-    pr("3 the network storage is full (see page 2)", colors.orange)
-    pr("4 the item is banned by a filter on the cable", colors.orange)
+    print("")
+    pr("nothing moved in any call shape. left to check:", colors.red)
+    pr("1 no item storage / full network (see page 2)", colors.orange)
+    pr("2 teller not on a wired modem network with the", colors.orange)
+    pr("  computer - and the modem must be turned on", colors.orange)
+    pr("3 bridge not touching the RS/ME cables", colors.orange)
+    pr("4 item banned by a filter on the cable", colors.orange)
   end
   scanTeller()
   pause()
