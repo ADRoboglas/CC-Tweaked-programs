@@ -1,5 +1,5 @@
 --[[===========================================================================
-  SHOP  v1.0.0  --  CC:Tweaked storefront
+  SHOP  v1.0.1  --  CC:Tweaked storefront
   Refined Storage (or AE2) through an Advanced Peripherals bridge + one barrel.
 
   Wiring:
@@ -13,7 +13,7 @@
   Data lives in  shopdata/  next to this program.
 ===========================================================================]]--
 
-local VERSION = "1.0.0"
+local VERSION = "1.0.1"
 
 local DIR    = "shopdata"
 local F_CFG  = DIR .. "/config.tbl"
@@ -367,35 +367,41 @@ local function freeStock(e)
   return math.max(0, stockOf(e.id) - (tonumber(e.reserve) or 0))
 end
 
--- export out of the network into the barrel; returns how many really moved
+-- export out of the network into the barrel; returns how many moved and why it stopped
 local function rsExport(id, n, nbt)
-  if not bridge or not barrelName or n <= 0 then return 0 end
-  local total, guard = 0, 0
+  if not bridge then return 0, "NO BRIDGE" end
+  if not barrelName then return 0, "NO TELLER" end
+  if n <= 0 then return 0 end
+  local total, guard, err = 0, 0, nil
   while total < n and guard < 80 do
     guard = guard + 1
-    local m = tonumber((bx(bridge.exportItemToPeripheral, filterOf(id, n - total, nbt), barrelName))) or 0
-    if m <= 0 then break end
+    local r, e = bx(bridge.exportItemToPeripheral, filterOf(id, n - total, nbt), barrelName)
+    local m = tonumber(r) or 0
+    if m <= 0 then err = e or "BRIDGE MOVED NOTHING"; break end
     total = total + m
   end
   if total > 0 then
     stockMap[id] = math.max(0, stockOf(id) - total)
     protect[id] = (protect[id] or 0) + total
   end
-  return total
+  return total, err
 end
 
--- import out of the barrel into the network; returns how many really moved
+-- import out of the barrel into the network; returns how many moved and why it stopped
 local function rsImport(id, n, nbt)
-  if not bridge or not barrelName or n <= 0 then return 0 end
-  local total, guard = 0, 0
+  if not bridge then return 0, "NO BRIDGE" end
+  if not barrelName then return 0, "NO TELLER" end
+  if n <= 0 then return 0 end
+  local total, guard, err = 0, 0, nil
   while total < n and guard < 80 do
     guard = guard + 1
-    local m = tonumber((bx(bridge.importItemFromPeripheral, filterOf(id, n - total, nbt), barrelName))) or 0
-    if m <= 0 then break end
+    local r, e = bx(bridge.importItemFromPeripheral, filterOf(id, n - total, nbt), barrelName)
+    local m = tonumber(r) or 0
+    if m <= 0 then err = e or "BRIDGE MOVED NOTHING"; break end
     total = total + m
   end
   if total > 0 then stockMap[id] = stockOf(id) + total end
-  return total
+  return total, err
 end
 
 --==========================================================================
@@ -471,6 +477,14 @@ end
 
 local function touch() S.lastAct = os.clock() end
 
+local lastGripe = -100
+local function gripe(what, err)
+  if not err then return end
+  if os.clock() - lastGripe < 6 then return end
+  lastGripe = os.clock()
+  msg(what .. ": " .. trunc(tostring(err), 28), "bad")
+end
+
 --==========================================================================
 -- TRANSACTIONS
 --==========================================================================
@@ -479,7 +493,8 @@ local function depositCurrency()
   for _, u in ipairs(CFG.currency.units) do
     local n = avail(u.id)
     if n > 0 then
-      local moved = rsImport(u.id, n)
+      local moved, err = rsImport(u.id, n)
+      if moved <= 0 then gripe("DEPOSIT FAILED", err) end
       if moved > 0 then
         local credit = moved * (tonumber(u.value) or 0)
         S.bal = S.bal + credit
@@ -526,14 +541,14 @@ local function doBuy(e, qty)
   S.bal = S.bal - price
   jrnSet({ kind = "BUY", id = e.id, want = qty, charged = price, who = S.name,
            before = stockOf(e.id), t = os.epoch("utc") })
-  local moved = rsExport(e.id, qty, e.nbt)
+  local moved, xerr = rsExport(e.id, qty, e.nbt)
   jrnClear()
 
   if moved < qty then
     local refund = price - buyPrice(e, moved)
     S.bal = S.bal + refund
     if moved <= 0 then
-      msg("DELIVERY FAILED - REFUNDED " .. money(refund), "bad")
+      msg("DELIVERY FAILED (" .. trunc(tostring(xerr or "?"), 18) .. ") - REFUNDED " .. money(refund), "bad")
       logAdd("BUY", S.name, e.id, 0, 0, "failed, refund " .. refund)
       return
     end
@@ -563,9 +578,11 @@ local function doSell(e, qty)
   end
 
   jrnSet({ kind = "SELL", id = e.id, want = qty, charged = 0, who = S.name, t = os.epoch("utc") })
-  local moved = rsImport(e.id, qty, e.nbt)
+  local moved, ierr = rsImport(e.id, qty, e.nbt)
   jrnClear()
-  if moved <= 0 then return msg("COULD NOT TAKE THE ITEMS", "bad") end
+  if moved <= 0 then
+    return msg("COULD NOT TAKE THE ITEMS (" .. trunc(tostring(ierr or "?"), 20) .. ")", "bad")
+  end
 
   local pay = sellPrice(e, moved)
   S.bal = S.bal + pay
@@ -614,7 +631,8 @@ local function cashOut(reason)
   for _, u in ipairs(unitsDesc()) do
     local n = math.floor(S.bal / (tonumber(u.value) or 1))
     if n > 0 then
-      local moved = rsExport(u.id, math.min(n, stockOf(u.id)))
+      local moved, cerr = rsExport(u.id, math.min(n, stockOf(u.id)))
+      if moved <= 0 then gripe("PAYOUT FAILED", cerr) end
       S.bal = S.bal - moved * u.value
       paid = paid + moved * u.value
     end
@@ -1621,6 +1639,107 @@ local function importCatalog(path, replace)
   return added, updated
 end
 
+--------------------------------------------------------------------------
+-- self test: answers "why is the barrel ignored?"
+--------------------------------------------------------------------------
+local function sideName(n)
+  return n == "top" or n == "bottom" or n == "left"
+      or n == "right" or n == "front" or n == "back"
+end
+
+local function selfTest()
+  bindPeripherals()
+  aclear("SELF TEST 1/3  wiring")
+  if bridge then
+    pr("bridge  : " .. tostring(peripheral.getName(bridge)), colors.lime)
+    local l, e = bx(bridge.listItems)
+    if type(l) == "table" then
+      pr("          sees " .. #l .. " stacks in the network", colors.lime)
+    else
+      pr("          listItems FAILED: " .. tostring(e), colors.red)
+    end
+  else
+    pr("bridge  : NOT FOUND - attach an rsBridge or meBridge", colors.red)
+  end
+
+  if barrel then
+    pr("teller  : " .. tostring(barrelName), colors.lime)
+    if sideName(barrelName) then
+      pr("          that is a SIDE name - the bridge cannot", colors.red)
+      pr("          reach a container addressed by side.", colors.red)
+      pr("          put a wired modem on the barrel, turn it", colors.red)
+      pr("          on, then pick it in MAINTENANCE > 2.", colors.red)
+    end
+  else
+    pr("teller  : NOT FOUND", colors.red)
+  end
+  pr("monitor : " .. tostring(monName or "none (front is on this screen)"))
+  pr("detector: " .. tostring(det and "yes" or "no (wallets off)"))
+  pause()
+
+  aclear("SELF TEST 2/3  money and goods")
+  pr("credit symbol " .. SYM() .. ", currency units:", colors.lightGray)
+  for _, u in ipairs(CFG.currency.units) do
+    local have = stockOf(u.id)
+    pr("  " .. pad(u.id, 24) .. " =" .. rpad(tostring(u.value) .. SYM(), 6)
+       .. " net x" .. commify(have), have > 0 and colors.white or colors.orange)
+  end
+  scanTeller()
+  pr("")
+  pr("lying in the teller right now:", colors.lightGray)
+  local any = false
+  for id, n in pairs(tellerCount) do
+    any = true
+    local u, e = unitById(id), itemById(id)
+    local verdict, col
+    if u then
+      verdict = "CURRENCY, " .. tostring(u.value) .. SYM() .. " each"; col = colors.lime
+    elseif e and (tonumber(e.sell) or 0) > 0 and CFG.shop.sellEnabled then
+      verdict = "bought back at " .. tostring(e.sell); col = colors.lime
+    elseif e then
+      verdict = "in the catalog, but not bought"; col = colors.orange
+    else
+      verdict = "NOT ACCEPTED - not currency, not in the catalog"; col = colors.orange
+    end
+    local held = protect[id]
+    pr("  " .. pad(id, 26) .. " x" .. n .. (held and ("  (" .. held .. " held)") or ""))
+    pr("    " .. verdict, col)
+  end
+  if not any then pr("  (empty - drop something in and run this again)", colors.lightGray) end
+  pause()
+
+  aclear("SELF TEST 3/3  live move")
+  if not (bridge and barrel) then
+    pr("skipped: bridge or teller missing", colors.red)
+    return pause()
+  end
+  local pick
+  for id, n in pairs(tellerCount) do if n > 0 then pick = id break end end
+  if not pick then
+    pr("put any item in the teller and run this again -", colors.lightGray)
+    pr("this step moves 1 of it into the network and back,", colors.lightGray)
+    pr("which is the real proof that the bridge can reach", colors.lightGray)
+    pr("your barrel.", colors.lightGray)
+    return pause()
+  end
+  pr("test item: " .. pick, colors.yellow)
+  if not askYN("move 1 of it to the network and back?", true) then return end
+  local inN, inE = rsImport(pick, 1)
+  if inN > 0 then pr("teller -> network : ok", colors.lime)
+  else pr("teller -> network : FAILED " .. tostring(inE), colors.red) end
+  local outN, outE = rsExport(pick, math.max(1, inN))
+  if outN > 0 then pr("network -> teller : ok", colors.lime)
+  else pr("network -> teller : FAILED " .. tostring(outE), colors.red) end
+  if inN > 0 and outN > 0 then
+    pr("")
+    pr("bridge and teller talk to each other. if a", colors.lime)
+    pr("deposit still does nothing, the item id is not", colors.lime)
+    pr("a currency unit - compare it with step 2.", colors.lime)
+  end
+  scanTeller()
+  pause()
+end
+
 local RUN = true
 
 local function pageTools()
@@ -1635,6 +1754,7 @@ local function pageTools()
     pr("7 log size            " .. tostring(CFG.admin.logSize))
     pr("8 wipe catalog")
     pr("9 factory reset")
+    pr("t SELF TEST - why is the barrel ignored?")
     pr("r reboot computer     x quit the program")
     print("")
     pr("q back", colors.lightGray)
@@ -1706,6 +1826,8 @@ local function pageTools()
         loadCfg(); bindPeripherals()
         pr("defaults restored (wallets kept)", colors.lime); pause()
       end
+    elseif v == "t" then
+      selfTest()
     elseif v == "r" then
       if askYN("reboot?", false) then os.reboot() end
     elseif v == "x" then
@@ -1732,7 +1854,7 @@ local function adminMain()
     pr("6 interface & wallets")
     pr("7 wallets")
     pr("8 log & stats")
-    pr("9 maintenance")
+    pr("9 maintenance  (self test lives here)")
     print("")
     pr("0 back to the shop", colors.lightGray)
     write("> ")
@@ -1956,7 +2078,10 @@ end
 local function main()
   boot()
   drawFront(); drawConsole()
-  local tick = os.startTimer(tonumber(CFG.ui.tick) or 0.5)
+  local tick
+  local lastScan = os.clock()
+  local function armTick() tick = os.startTimer(tonumber(CFG.ui.tick) or 0.5) end
+  armTick()
 
   while RUN do
     local e = { os.pullEventRaw() }
@@ -1968,7 +2093,8 @@ local function main()
       redraw = false
 
     elseif ev == "timer" and e[2] == tick then
-      tick = os.startTimer(tonumber(CFG.ui.tick) or 0.5)
+      armTick()
+      lastScan = os.clock()
       scanTeller()
       depositCurrency()
       scanTeller()
@@ -1994,6 +2120,7 @@ local function main()
       local k = e[2]
       if k == keys.f1 then
         enterAdmin()
+        armTick()
       elseif frDev == "term" then
         if k == keys.tab then
           local W, H = term.getSize()
@@ -2002,6 +2129,7 @@ local function main()
           term.setTextColor(colors.white)
           UI.filter = read() or ""
           UI.page = 1
+          armTick()
           touch()
         elseif k == keys.backspace then
           UI.filter = ""; UI.page = 1
@@ -2010,7 +2138,7 @@ local function main()
 
     elseif ev == "char" and frDev == "mon" then
       local c = e[2]:lower()
-      if c == "a" then enterAdmin()
+      if c == "a" then enterAdmin(); armTick()
       elseif c == "q" then RUN = false; redraw = false end
 
     elseif ev == "peripheral" or ev == "peripheral_detach" then
@@ -2024,6 +2152,13 @@ local function main()
 
     else
       redraw = false
+    end
+
+    -- watchdog: the scan must never stop, whatever ate the timer event
+    if RUN and (os.clock() - lastScan) > math.max(3, (tonumber(CFG.ui.tick) or 0.5) * 8) then
+      lastScan = os.clock()
+      armTick()
+      scanTeller(); depositCurrency(); scanTeller(); autoSellPass()
     end
 
     if redraw and RUN then
